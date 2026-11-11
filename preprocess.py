@@ -79,6 +79,11 @@ def main():
     if ADD_FEATURES:
         df = add_features(df)
 
+    # Export the full cleaned dataset (before split/scaling) so it can be inspected directly
+    os.makedirs(OUT_DIR, exist_ok=True)
+    df.to_csv(f"{OUT_DIR}/cleaned.csv", index=False)
+    print(f"[save] cleaned data -> {OUT_DIR}/cleaned.csv  shape = {df.shape}")
+
     X = df.drop(columns=[TARGET])
     y = df[TARGET]
     print(f"[target] failure rate = {y.mean():.2%}  (highly imbalanced)")
