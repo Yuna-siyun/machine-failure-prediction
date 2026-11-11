@@ -2,24 +2,47 @@
 AI4I 2020 Predictive Maintenance - Preprocessing Script
 DS 301 Midterm Project
 
-Run:    python preprocess.py
-Input:  data/raw/ai4i2020.csv
-Output: train/test CSVs + scaler.pkl in data/processed/
+Two modes:
+  paper    : reproduce the paper  -> 70/30 split, MinMaxScaler, original features only
+  improved : our extended version -> 80/20 split, StandardScaler, + 3 engineered features
+
+Run:
+  python preprocess.py                  # default: paper mode
+  python preprocess.py --mode improved
+
+Input:  data/ai4i2020.csv
+Output: data/processed/<mode>/
+          cleaned.csv                         full cleaned dataset (unscaled, for inspection)
+          X_train.csv, X_test.csv             UNSCALED features
+          y_train.csv, y_test.csv             target
+
+Scaling is NOT applied to the saved files. To avoid leakage during cross-validation,
+the scaler must be fitted inside each CV fold. Use build_pipeline() in the modeling code:
+
+  from preprocess import build_pipeline
+  pipe = build_pipeline(LogisticRegression(max_iter=1000), mode="paper")
+  cross_val_score(pipe, X_train, y_train, cv=StratifiedKFold(5), scoring="f1")
 """
+import argparse
 import os
-import pickle
 
 import pandas as pd
+from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-RAW_PATH = "data/raw/ai4i2020.csv"
-OUT_DIR = "data/processed"
+RAW_PATH = "data/ai4i2020.csv"
+OUT_ROOT = "data/processed"
 TARGET_RAW = "Machine failure"
 TARGET = "machine_failure"   # name after column cleanup
 FAILURE_MODES = ["TWF", "HDF", "PWF", "OSF", "RNF"]
 RANDOM_STATE = 42   # fixed so every team member gets the same split
-TEST_SIZE = 0.2
+
+CONFIGS = {
+    "paper":    {"test_size": 0.3, "scaler": MinMaxScaler,   "add_features": False},
+    "improved": {"test_size": 0.2, "scaler": StandardScaler, "add_features": True},
+}
 
 
 def load_data(path):
@@ -30,10 +53,10 @@ def load_data(path):
 
 
 def check_label_consistency(df):
-    """Check rows where 'Machine failure' disagrees with the failure modes (TWF-RNF).
+    """Report rows where 'Machine failure' disagrees with the failure modes (TWF-RNF).
     - Failure mode present but Machine failure = 0 : 18 rows (all RNF)
     - Machine failure = 1 but no failure mode       : 9 rows
-    These rows are only reported here, not removed (the team decides how to handle them)."""
+    These rows are kept (not removed); the team decides how to handle them."""
     n_modes = df[FAILURE_MODES].sum(axis=1)
     a = ((df[TARGET_RAW] == 0) & (n_modes > 0)).sum()
     b = ((df[TARGET_RAW] == 1) & (n_modes == 0)).sum()
@@ -60,29 +83,44 @@ def encode_type(df):
 
 
 def add_features(df):
-    """Domain-based engineered features (optional). Set ADD_FEATURES = False if the paper doesn't use them."""
+    """Domain-based engineered features (improved mode only)."""
     df["temp_diff"] = df["process_temperature"] - df["air_temperature"]          # heat dissipation (HDF)
     df["power"] = df["torque"] * df["rotational_speed"] * 2 * 3.141592653589793 / 60  # watts (PWF)
     df["strain"] = df["tool_wear"] * df["torque"]                                  # overstrain (OSF)
     return df
 
 
-ADD_FEATURES = True
+def build_pipeline(model, mode="paper"):
+    """Scaler + model in one Pipeline.
+    When passed to cross_val_score / GridSearchCV, the scaler is re-fitted on the
+    training folds only, so validation folds never leak into scaling.
+    'type' is ordinal-encoded and passed through without scaling."""
+    scaler_cls = CONFIGS[mode]["scaler"]
+    preprocessor = ColumnTransformer(
+        transformers=[("scale", scaler_cls(), make_column_selector(pattern=r"^(?!type$)"))],
+        remainder="passthrough",
+    )
+    return Pipeline([("preprocess", preprocessor), ("model", model)])
 
 
-def main():
+def preprocess(mode="paper"):
+    cfg = CONFIGS[mode]
+    out_dir = f"{OUT_ROOT}/{mode}"
+    print(f"[mode] {mode}: test_size={cfg['test_size']}, scaler={cfg['scaler'].__name__}, "
+          f"add_features={cfg['add_features']}")
+
     df = load_data(RAW_PATH)
     check_label_consistency(df)
 
     df = clean_columns(df)
     df = encode_type(df)
-    if ADD_FEATURES:
+    if cfg["add_features"]:
         df = add_features(df)
 
     # Export the full cleaned dataset (before split/scaling) so it can be inspected directly
-    os.makedirs(OUT_DIR, exist_ok=True)
-    df.to_csv(f"{OUT_DIR}/cleaned.csv", index=False)
-    print(f"[save] cleaned data -> {OUT_DIR}/cleaned.csv  shape = {df.shape}")
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(f"{out_dir}/cleaned.csv", index=False)
+    print(f"[save] cleaned data -> {out_dir}/cleaned.csv  shape = {df.shape}")
 
     X = df.drop(columns=[TARGET])
     y = df[TARGET]
@@ -90,28 +128,24 @@ def main():
 
     # Stratified split: keeps the ~3.4% failure rate equal in train and test
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE)
+        X, y, test_size=cfg["test_size"], stratify=y, random_state=RANDOM_STATE)
 
-    # Scaling: fit on train only, then transform test (prevents leakage)
-    num_cols = [c for c in X.columns if c != "type"]
-    scaler = StandardScaler()
-    X_train_s, X_test_s = X_train.copy(), X_test.copy()
-    X_train_s[num_cols] = scaler.fit_transform(X_train[num_cols])
-    X_test_s[num_cols] = scaler.transform(X_test[num_cols])
+    # Saved UNSCALED: scaling happens inside build_pipeline() during model training
+    X_train.to_csv(f"{out_dir}/X_train.csv", index=False)
+    X_test.to_csv(f"{out_dir}/X_test.csv", index=False)
+    y_train.to_csv(f"{out_dir}/y_train.csv", index=False)
+    y_test.to_csv(f"{out_dir}/y_test.csv", index=False)
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    X_train_s.to_csv(f"{OUT_DIR}/X_train.csv", index=False)
-    X_test_s.to_csv(f"{OUT_DIR}/X_test.csv", index=False)
-    y_train.to_csv(f"{OUT_DIR}/y_train.csv", index=False)
-    y_test.to_csv(f"{OUT_DIR}/y_test.csv", index=False)
-    with open(f"{OUT_DIR}/scaler.pkl", "wb") as f:
-        pickle.dump(scaler, f)
-
-    print(f"[split] train = {X_train_s.shape}, test = {X_test_s.shape}")
+    print(f"[split] train = {X_train.shape}, test = {X_test.shape}")
     print(f"[split] failure rate train = {y_train.mean():.2%}, test = {y_test.mean():.2%}")
-    print(f"[save] saved to {OUT_DIR}/")
-    # Note: apply oversampling (e.g., SMOTE) only to the training data during the modeling step
+    print(f"[save] saved to {out_dir}/")
+    # Note: apply oversampling (e.g., SMOTE) only inside the training folds during modeling
+    return X_train, X_test, y_train, y_test
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=CONFIGS.keys(), default="paper",
+                        help="paper = reproduce the paper, improved = our extended version")
+    args = parser.parse_args()
+    preprocess(args.mode)
