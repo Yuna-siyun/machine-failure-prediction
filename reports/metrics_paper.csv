@@ -1,0 +1,5 @@
+model,accuracy,precision,recall,f1,specificity,balanced_accuracy,TP,FN,FP,TN
+Decision Tree,0.975,0.6134,0.7157,0.6606,0.9841,0.8499,73,29,46,2852
+KNN (K=5),0.9687,0.6111,0.2157,0.3188,0.9952,0.6054,22,80,14,2884
+SVM (RBF),0.966,0.0,0.0,0.0,1.0,0.5,0,102,0,2898
+Baseline: always 0,0.966,0.0,0.0,0.0,1.0,0.5,0,102,0,2898
